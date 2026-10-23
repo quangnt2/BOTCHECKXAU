@@ -1,0 +1,25 @@
+{
+  "name": "botcheckxau",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:silent": "wscript //nologo start_silent.vbs",
+    "stop": "powershell -ExecutionPolicy Bypass -Command \"$p = Get-CimInstance Win32_Process -Filter \\\"Name = 'node.exe'\\\" | Where-Object CommandLine -like '*src*index.js*'; if ($p) { $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Write-Host 'DA DUNG BOT' -ForegroundColor Yellow } else { Write-Host 'KHONG CO BOT CHAY' }\"",
+    "status": "powershell -ExecutionPolicy Bypass -Command \"$p = Get-CimInstance Win32_Process -Filter \\\"Name = 'node.exe'\\\" | Where-Object CommandLine -like '*src*index.js*'; if ($p) { Write-Host ('RUNNING (PID: ' + $p.ProcessId + ')') -ForegroundColor Green } else { Write-Host 'STOPPED' -ForegroundColor Red }\"",
+    "autostart:enable": "powershell -ExecutionPolicy Bypass -File ./scripts/setup_autostart.ps1",
+    "autostart:disable": "powershell -ExecutionPolicy Bypass -File ./scripts/remove_autostart.ps1",
+    "test": "node test/mt5_framework_test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^2.30.0",
+    "dotenv": "^18.0.8",
+    "node-cron": "^4.6.0",
+    "puppeteer": "^25.15.0"
+  }
+}

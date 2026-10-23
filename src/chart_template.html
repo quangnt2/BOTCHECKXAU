@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <title>TradingView XAUUSD</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100vw; height: 100vh; overflow: hidden; background: #131722; }
+    #tradingview_widget { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="tradingview_widget"></div>
+  <!-- TradingView Widget BEGIN -->
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+  <script type="text/javascript">
+    const urlParams = new URLSearchParams(window.location.search);
+    const symbol = urlParams.get('symbol') || 'OANDA:XAUUSD';
+    const interval = urlParams.get('interval') || '60';
+
+    new TradingView.widget({
+      "autosize": true,
+      "symbol": symbol,
+      "interval": interval,
+      "timezone": "Asia/Ho_Chi_Minh",
+      "theme": "dark",
+      "style": "1",
+      "locale": "vi_VN",
+      "toolbar_bg": "#1e222d",
+      "enable_publishing": false,
+      "withdateranges": true,
+      "hide_side_toolbar": false,
+      "allow_symbol_change": false,
+      "details": true,
+      "hotlist": false,
+      "calendar": false,
+      "container_id": "tradingview_widget",
+      "studies": [
+        {
+          "id": "MAExp@tv-basicstudies",
+          "inputs": { "length": 34 }
+        },
+        {
+          "id": "MAExp@tv-basicstudies",
+          "inputs": { "length": 89 }
+        },
+        {
+          "id": "MAExp@tv-basicstudies",
+          "inputs": { "length": 200 }
+        },
+        {
+          "id": "RSI@tv-basicstudies",
+          "inputs": { "length": 14 }
+        }
+      ]
+    });
+  </script>
+  <!-- TradingView Widget END -->
+</body>
+</html>
