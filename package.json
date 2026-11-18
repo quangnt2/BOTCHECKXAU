@@ -11,6 +11,7 @@
     "status": "powershell -ExecutionPolicy Bypass -Command \"$p = Get-CimInstance Win32_Process -Filter \\\"Name = 'node.exe'\\\" | Where-Object CommandLine -like '*src*index.js*'; if ($p) { Write-Host ('RUNNING (PID: ' + $p.ProcessId + ')') -ForegroundColor Green } else { Write-Host 'STOPPED' -ForegroundColor Red }\"",
     "autostart:enable": "powershell -ExecutionPolicy Bypass -File ./scripts/setup_autostart.ps1",
     "autostart:disable": "powershell -ExecutionPolicy Bypass -File ./scripts/remove_autostart.ps1",
+    "auth:telegram": "node scripts/auth_userbot.js",
     "test": "node test/mt5_framework_test.js"
   },
   "keywords": [],
@@ -19,7 +20,9 @@
   "dependencies": {
     "@google/genai": "^2.30.0",
     "dotenv": "^18.0.8",
+    "input": "^1.0.1",
     "node-cron": "^4.6.0",
-    "puppeteer": "^25.15.0"
+    "puppeteer": "^25.15.0",
+    "telegram": "^2.26.22"
   }
 }

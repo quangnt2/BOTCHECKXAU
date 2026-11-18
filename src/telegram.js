@@ -3,6 +3,9 @@ import path from 'path';
 import dotenv from 'dotenv';
 dotenv.config();
 
+// Bỏ qua lỗi SSL do proxy/antivirus trên máy tính
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 /**
  * Gửi Album ảnh đa khung thời gian (H4, H1, M15) kèm bài phân tích về Telegram
  * @param {Array<{ tf: string, path: string }>} chartImages Danh sách ảnh các khung thời gian

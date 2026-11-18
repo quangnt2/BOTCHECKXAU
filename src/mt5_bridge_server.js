@@ -249,6 +249,130 @@ export class MT5BridgeServer {
   }
 
   /**
+   * Đưa yêu cầu hủy 1 lệnh chờ Pending Limit sang MT5
+   * @param {Object} params
+   * @param {number|string} params.ticket
+   * @param {string} params.symbol
+   * @param {string} params.reason
+   */
+  queueCancelOrder({ ticket, symbol = 'XAUUSD', reason = 'Hủy lệnh chờ' }) {
+    const cancelOrder = {
+      id: `cancel_${ticket}_${Date.now()}`,
+      action: 'CANCEL_PENDING',
+      ticket: Number(ticket || 0),
+      symbol,
+      lot: 0,
+      sl: 0,
+      tp: 0,
+      orderType: 'PENDING',
+      entry: 0,
+      timeframe: 'CANCEL',
+      reason,
+      queuedAt: Date.now(),
+      status: 'QUEUED'
+    };
+    this.pendingQueue.unshift(cancelOrder);
+    this.activeOrders.set(cancelOrder.id, cancelOrder);
+    this.logger(`[MT5 Bridge] 🗑️ ĐÃ ĐƯA LỆNH HỦY LỆNH CHỜ #${ticket} SANG MT5! Lý do: ${reason}`);
+    return cancelOrder.id;
+  }
+
+  /**
+   * Đưa lệnh mở khóa Circuit Breaker sang MT5 EA
+   */
+  queueUnlockCircuitBreaker() {
+    const unlockOrder = {
+      id: `unlock_${Date.now()}`,
+      action: 'UNLOCK',
+      symbol: 'XAUUSD',
+      lot: 0,
+      sl: 0,
+      tp: 0,
+      comment: 'Reset Circuit Breaker tu Node.js',
+      queuedAt: Date.now(),
+      status: 'QUEUED'
+    };
+    this.pendingQueue.unshift(unlockOrder);
+    this.activeOrders.set(unlockOrder.id, unlockOrder);
+    this.logger(`[MT5 Bridge] 🔓 ĐÃ ĐƯA LỆNH MỞ KHÓA [UNLOCK] SANG MT5!`);
+    return unlockOrder.id;
+  }
+
+  /**
+   * Đưa lệnh hủy tất cả lệnh chờ sang MT5 EA
+   */
+  queueCancelAllPending(reason = 'Hủy tất cả lệnh chờ') {
+    const cancelAllOrder = {
+      id: `cancelall_${Date.now()}`,
+      action: 'CANCEL_ALL_PENDING',
+      symbol: 'XAUUSD',
+      lot: 0,
+      sl: 0,
+      tp: 0,
+      reason,
+      comment: 'Cancel all pending from AI',
+      queuedAt: Date.now(),
+      status: 'QUEUED'
+    };
+    this.pendingQueue.unshift(cancelAllOrder);
+    this.activeOrders.set(cancelAllOrder.id, cancelAllOrder);
+    this.logger(`[MT5 Bridge] 🗑️ ĐÃ ĐƯA LỆNH [CANCEL_ALL_PENDING] SANG MT5! Lý do: ${reason}`);
+    return cancelAllOrder.id;
+  }
+
+  /**
+   * Đưa lệnh dời SL về hòa vốn sang MT5 EA
+   */
+  queueMoveSlToBreakeven(symbol = 'XAUUSD') {
+    const beOrder = {
+      id: `be_${Date.now()}`,
+      action: 'MOVE_SL_BE',
+      symbol,
+      lot: 0,
+      sl: 0,
+      tp: 0,
+      comment: 'Move SL to BE from AI',
+      queuedAt: Date.now(),
+      status: 'QUEUED'
+    };
+    this.pendingQueue.unshift(beOrder);
+    this.activeOrders.set(beOrder.id, beOrder);
+    this.logger(`[MT5 Bridge] 🛡️ ĐÃ ĐƯA LỆNH DỜI SL HÒA VỐN [MOVE_SL_BE] SANG MT5!`);
+    return beOrder.id;
+  }
+
+  /**
+   * Lấy danh sách lệnh chờ và vị thế mở thời gian thực
+   */
+  getTradingState() {
+    return {
+      pendingOrders: this.latestHeartbeat?.pendingOrdersList || [],
+      openPositions: this.latestHeartbeat?.openPositionsList || []
+    };
+  }
+
+  /**
+   * Đưa lệnh cập nhật SL/TP sang MT5 EA
+   */
+  queueUpdateSlTp({ symbol = 'XAUUSD', sl = 0, tp = 0 }) {
+    const updateOrder = {
+      id: `updatesltp_${Date.now()}`,
+      action: 'UPDATE_SL_TP',
+      symbol,
+      lot: 0,
+      sl: Number(sl || 0),
+      tp: Number(tp || 0),
+      comment: 'Update SL/TP from AI',
+      queuedAt: Date.now(),
+      status: 'QUEUED'
+    };
+    this.pendingQueue.unshift(updateOrder);
+    this.activeOrders.set(updateOrder.id, updateOrder);
+    this.logger(`[MT5 Bridge] 🔄 ĐÃ ĐƯA LỆNH [UPDATE_SL_TP] (SL: ${sl}, TP: ${tp}) SANG MT5!`);
+    return updateOrder.id;
+  }
+
+  /**
    * Xử lý khi MT5 EA hỏi lệnh mới
    */
   handleGetSignal(res) {
@@ -274,7 +398,7 @@ export class MT5BridgeServer {
           order_type: order.orderType || 'MARKET',
           entry_price: order.entry,
           magic: Number(process.env.MT5_MAGIC_NUMBER || 888999),
-          comment: order.action === 'CLOSE' ? `CLOSE_${order.ticket}` : `AI_${order.timeframe || 'M15'}`
+          comment: order.comment || (order.action === 'CLOSE' ? `CLOSE_${order.ticket}` : `AI_${order.timeframe || 'M15'}`)
         }
       }));
     } else {
@@ -344,6 +468,7 @@ export class MT5BridgeServer {
       equity: Number(data.equity || 0),
       openPositions: Number(data.positions_count || 0),
       openPositionsList: Array.isArray(data.open_positions) ? data.open_positions : [],
+      pendingOrdersList: Array.isArray(data.pending_orders) ? data.pending_orders : [],
       closedDealsList: incomingDeals,
       todayProfit: Number(data.today_profit || 0),
       serverName: data.server || '',
@@ -365,7 +490,15 @@ export class MT5BridgeServer {
     }
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
+    res.end(JSON.stringify({
+      ok: true,
+      config: {
+        breakeven_trigger_usd: Number(process.env.BREAKEVEN_TRIGGER_USD || 10.0),
+        breakeven_offset_usd: Number(process.env.BREAKEVEN_OFFSET_USD || 1.0),
+        lock_profit_trigger_usd: Number(process.env.LOCK_PROFIT_TRIGGER_USD || 15.0),
+        lock_profit_offset_usd: Number(process.env.LOCK_PROFIT_OFFSET_USD || 6.0)
+      }
+    }));
   }
 
   /**

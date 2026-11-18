@@ -28,9 +28,17 @@ export class OrderManager {
     this._alertSentForCircuitBreaker = false;
 
     /** Cấu hình bật/tắt chế độ Scalp và Hold dài */
-    this.enableScalp = (process.env.ENABLE_SCALP || 'true').toLowerCase() === 'true';
+    this.enableScalp = (process.env.ENABLE_SCALP || 'false').toLowerCase() === 'true';
     this.enableHold = (process.env.ENABLE_HOLD || 'true').toLowerCase() === 'true';
+    this.enableScalpM1 = (process.env.ENABLE_SCALP_M1 || 'false').toLowerCase() === 'true';
+    this.scalpM1TpUSD = Number(process.env.SCALP_M1_TP_USD || 2.5);
+    this.scalpM1SlUSD = Number(process.env.SCALP_M1_SL_USD || 7.0);
+    this.scalpM1IntervalSec = Number(process.env.SCALP_M1_INTERVAL_SEC || 60);
     this.autoCloseOnTrendReversal = (process.env.AUTO_CLOSE_ON_TREND_REVERSAL || 'true').toLowerCase() === 'true';
+    this.riskManager.enableScalpM1 = this.enableScalpM1;
+    this.riskManager.scalpM1TpUSD = this.scalpM1TpUSD;
+    this.riskManager.scalpM1SlUSD = this.scalpM1SlUSD;
+    this.lastH4Trend = 'SIDEWAY';
     this._autoExecuteOverride = null;
   }
 
@@ -116,6 +124,22 @@ export class OrderManager {
       return null;
     }
 
+    const style = signal.tradeStyle || 'SCALP';
+    const isMtfCycle = style === 'HOLD' || ['H1', 'H4', 'D1'].includes(signal.timeframe);
+
+    // Cập nhật xu hướng H4 chủ đạo từ chu kỳ phân tích đa khung thời gian
+    if (isMtfCycle && signal.h4Trend && signal.h4Trend !== 'SIDEWAY') {
+      this.lastH4Trend = signal.h4Trend;
+    }
+
+    // Nếu là Scalp M1 nhưng chưa có xu hướng H4 từ signal, kế thừa xu hướng H4 chủ đạo đã lưu
+    if (style === 'SCALP_M1') {
+      if ((!signal.h4Trend || signal.h4Trend === 'SIDEWAY') && this.lastH4Trend && this.lastH4Trend !== 'SIDEWAY') {
+        signal.h4Trend = this.lastH4Trend;
+      }
+      signal.comment = 'AI_SCALP_M1';
+    }
+
     // 1.1 Quét xu hướng & Tự động ngắt lệnh nếu xu hướng đảo chiều ngược vị thế đang mở
     await this.checkAndHandleTrendReversal(signal, currentPrice, notifyChatIds);
 
@@ -124,9 +148,12 @@ export class OrderManager {
       return null;
     }
 
-    // 1.2 Kiểm tra bộ lọc bật/tắt chế độ SCALP và HOLD DÀI
-    const style = signal.tradeStyle || 'SCALP';
-    if (style === 'SCALP' && !this.enableScalp) {
+    // 1.2 Kiểm tra bộ lọc bật/tắt chế độ SCALP M1, SCALP và HOLD DÀI
+    if (style === 'SCALP_M1' && !this.enableScalpM1) {
+      this.logger(`[OrderManager] ⏸️ Tín hiệu SCALP M1 (${signal.action} @ ${signal.entry}) bị bỏ qua vì tính năng SCALP M1 đang TẮT. Gõ /scalpm1 on để bật.`);
+      return null;
+    }
+    if (style === 'SCALP' && !this.enableScalp && !this.enableScalpM1) {
       this.logger(`[OrderManager] ⏸️ Tín hiệu SCALP (${signal.action} @ ${signal.entry}) bị bỏ qua vì chế độ SCALP đang TẮT. Gõ /scalp on để bật.`);
       return null;
     }
@@ -137,8 +164,12 @@ export class OrderManager {
 
     this.logger(`[OrderManager] 💡 Phát hiện tín hiệu sơ bộ [${style}]: [${signal.action}] @ ${signal.entry} (SL: ${signal.sl}, TP: ${signal.tp}, R:R: ${signal.rr}) | Xu hướng: ${signal.trend || 'N/A'}`);
 
-    // 2. Kiểm tra lệnh đang chạy và kiểm duyệt an toàn qua Risk Manager
+    // 2. Kiểm tra lệnh đang chạy, spread hiện tại và kiểm duyệt an toàn qua Risk Manager
     const unclosedContext = this.bridge.checkUnclosedOrders(signal.symbol);
+    const liveMarket = this.bridge.getLatestMarketPrice ? this.bridge.getLatestMarketPrice() : null;
+    if (liveMarket && liveMarket.spread !== undefined) {
+      unclosedContext.spread = Number(liveMarket.spread);
+    }
     const validation = this.riskManager.validateSignal(signal, currentPrice, unclosedContext);
     if (!validation.valid) {
       this.logger(`[OrderManager] ⚠️ Tín hiệu bị từ chối bởi Risk Manager: ${validation.reason}`);
@@ -162,15 +193,19 @@ export class OrderManager {
     // 4. Quyết định luồng khớp lệnh: Tự động (Full-Auto) hoặc Bán tự động (Semi-Auto via Telegram)
     if (this.autoExecute) {
       this.logger(`[OrderManager] ⚡ Chế độ AUTO_EXECUTE=true: Đang đẩy lệnh trực tiếp sang MT5...`);
-      this.riskManager.recordTradeExecution();
+      this.riskManager.recordTradeExecution(signal.tradeStyle);
       this.bridge.queueOrder(signal);
+
+      const tpStr = signal.tp1 ? `TP1: ${signal.tp1} | TP2: ${signal.tp}` : `TP: ${signal.tp}`;
+      const setupStr = (signal.setupModel && signal.setupModel !== 'NONE') ? `\n• Setup ICT: ${signal.setupModel} [${signal.pdaZone || 'EQ'}]` : '';
+      const rsiStr = signal.h1Rsi ? `\n• Elder Triple Screen H1 RSI: ${signal.h1Rsi} (${signal.h1OscillatorFilter || 'PASS'})` : '';
 
       const msg = [
         `[MT5 AUTO EXECUTE]`,
         `• Lệnh: ${signal.action} ${signal.lot} Lot ${signal.symbol}`,
         `• Entry: ${signal.entry}`,
-        `• SL: ${signal.sl} | TP: ${signal.tp}`,
-        `• R:R: 1:${signal.rr}`,
+        `• SL: ${signal.sl} | ${tpStr}`,
+        `• R:R: 1:${signal.rr}${setupStr}${rsiStr}`,
         `• Lý do: ${signal.reason}`
       ].join('\n');
 
@@ -194,12 +229,16 @@ export class OrderManager {
         chatIds: targetChatIds
       });
 
+      const semiTpStr = signal.tp1 ? `TP1: ${signal.tp1} | TP2: ${signal.tp}` : `TP: ${signal.tp}`;
+      const semiSetupStr = (signal.setupModel && signal.setupModel !== 'NONE') ? `\n• Setup ICT: ${signal.setupModel} [${signal.pdaZone || 'EQ'}]` : '';
+      const semiRsiStr = signal.h1Rsi ? `\n• Elder Triple Screen H1 RSI: ${signal.h1Rsi} (${signal.h1OscillatorFilter || 'PASS'})` : '';
+
       const promptMsg = [
         `[TÍN HIỆU MT5]`,
         `• Lệnh: ${signal.action} ${signal.lot} Lot`,
         `• Entry: ${signal.entry}`,
-        `• SL: ${signal.sl} | TP: ${signal.tp}`,
-        `• R:R: 1:${signal.rr}`,
+        `• SL: ${signal.sl} | ${semiTpStr}`,
+        `• R:R: 1:${signal.rr}${semiSetupStr}${semiRsiStr}`,
         `• Khung: ${signal.timeframe}`,
         `• Lý do: ${signal.reason}`
       ].join('\n');
@@ -255,7 +294,7 @@ export class OrderManager {
       }
 
       this.pendingApprovals.delete(signalId);
-      this.riskManager.recordTradeExecution();
+      this.riskManager.recordTradeExecution(item.signal.tradeStyle);
       this.bridge.queueOrder(item.signal);
 
       return `[MT5] Đã duyệt lệnh: ${item.signal.action} ${item.signal.lot} Lot.`;
@@ -268,6 +307,10 @@ export class OrderManager {
     }
 
     // Xử lý các nút bấm chuyển đổi chế độ giao dịch
+    if (callbackData === 'TOGGLE_SCALP_M1') {
+      this.toggleScalpM1();
+      return this.getTradingModeStatus();
+    }
     if (callbackData === 'TOGGLE_SCALP') {
       this.toggleScalp();
       return this.getTradingModeStatus();
@@ -276,8 +319,14 @@ export class OrderManager {
       this.toggleHold();
       return this.getTradingModeStatus();
     }
+    if (callbackData === 'MODE_SCALP_M1_ONLY') {
+      this.setScalpM1(true);
+      this.setHold(false);
+      this.setScalp(false);
+      return this.getTradingModeStatus();
+    }
     if (callbackData === 'MODE_BOTH') {
-      this.setScalp(true);
+      this.setScalpM1(true);
       this.setHold(true);
       return this.getTradingModeStatus();
     }
@@ -287,17 +336,52 @@ export class OrderManager {
       return this.getTradingModeStatus();
     }
     if (callbackData === 'MODE_HOLD_ONLY') {
+      this.setScalpM1(false);
       this.setScalp(false);
       this.setHold(true);
       return this.getTradingModeStatus();
     }
     if (callbackData === 'MODE_OFF') {
+      this.setScalpM1(false);
       this.setScalp(false);
       this.setHold(false);
       return this.getTradingModeStatus();
     }
 
     return null;
+  }
+
+  /**
+   * Thiết lập tính năng SCALP M1 liên tục (TP 2-3 giá, SL 7 giá)
+   * @param {boolean} enabled
+   */
+  setScalpM1(enabled) {
+    this.enableScalpM1 = Boolean(enabled);
+    this.riskManager.enableScalpM1 = this.enableScalpM1;
+    this.logger(`[OrderManager] ⚡ Tính năng SCALP M1 liên tục đã chuyển sang: ${this.enableScalpM1 ? 'BẬT' : 'TẮT'} (TP: ${this.scalpM1TpUSD}U, SL: ${this.scalpM1SlUSD}U)`);
+    return this.enableScalpM1;
+  }
+
+  toggleScalpM1() {
+    return this.setScalpM1(!this.enableScalpM1);
+  }
+
+  /**
+   * Cấu hình khoảng cách TP và SL cho Scalp M1
+   * @param {number} tp
+   * @param {number} sl
+   */
+  setScalpM1Config(tp, sl) {
+    if (tp && tp > 0) {
+      this.scalpM1TpUSD = Number(tp);
+      this.riskManager.scalpM1TpUSD = this.scalpM1TpUSD;
+    }
+    if (sl && sl > 0) {
+      this.scalpM1SlUSD = Number(sl);
+      this.riskManager.scalpM1SlUSD = this.scalpM1SlUSD;
+    }
+    this.logger(`[OrderManager] ⚙️ Đã cấu hình Scalp M1: TP = ${this.scalpM1TpUSD} giá | SL = ${this.scalpM1SlUSD} giá`);
+    return { tp: this.scalpM1TpUSD, sl: this.scalpM1SlUSD };
   }
 
   /**
@@ -329,24 +413,66 @@ export class OrderManager {
   }
 
   /**
+   * Cập nhật cấu hình khối lượng (lot) và số lệnh tối đa cho phép
+   * @param {{ defaultLot?: number, maxLot?: number, maxTotalLot?: number, maxConcurrentTrades?: number }} config
+   */
+  setLotConfig({ defaultLot, maxLot, maxTotalLot, maxConcurrentTrades } = {}) {
+    const updates = {};
+    if (defaultLot !== undefined && Number(defaultLot) > 0) updates.defaultLot = Number(defaultLot);
+    if (maxLot !== undefined && Number(maxLot) > 0) updates.maxLot = Number(maxLot);
+    if (maxTotalLot !== undefined && Number(maxTotalLot) > 0) updates.maxTotalLot = Number(maxTotalLot);
+    if (maxConcurrentTrades !== undefined && Number(maxConcurrentTrades) >= 1) updates.maxConcurrentTrades = Number(maxConcurrentTrades);
+
+    this.riskManager.updateConfig(updates);
+    this.logger(`[OrderManager] 📊 Cập nhật cấu hình Lot & Số lệnh: Default Lot: ${this.riskManager.defaultLot} | Max Lot/Lệnh: ${this.riskManager.maxLot} | Max Tổng Lot: ${this.riskManager.maxTotalLot} | Số lệnh tối đa: ${this.riskManager.maxConcurrentTrades}`);
+    return this.getLotConfig();
+  }
+
+  /**
+   * Lấy cấu hình lot và số lệnh hiện hành
+   */
+  getLotConfig() {
+    return {
+      defaultLot: this.riskManager.defaultLot,
+      maxLot: this.riskManager.maxLot,
+      maxTotalLot: this.riskManager.maxTotalLot,
+      maxConcurrentTrades: this.riskManager.maxConcurrentTrades,
+      allowConcurrentTrades: this.riskManager.allowConcurrentTrades
+    };
+  }
+
+  /**
    * Trả về bảng thông tin trực quan trạng thái chế độ giao dịch
    */
   getTradingModeStatus() {
-    const scalpTag = this.enableScalp ? '🟢 BẬT' : '🔴 TẮT';
+    const scalpM1Tag = this.enableScalpM1 ? '🟢 BẬT' : '🔴 TẮT';
     const holdTag = this.enableHold ? '🟢 BẬT' : '🔴 TẮT';
+    const scalpTag = this.enableScalp ? '🟢 BẬT' : '🔴 TẮT';
+
     let currentModeText = 'TẮT TẤT CẢ (CHỈ THEO DÕI)';
-    if (this.enableScalp && this.enableHold) currentModeText = 'GIAO DỊCH CẢ HAI (FULL)';
-    else if (this.enableScalp) currentModeText = 'CHỈ GIAO DỊCH SCALP (M1/M5)';
+    if (this.enableScalpM1 && this.enableHold) currentModeText = 'SCALP M1 + HOLD DÀI';
+    else if (this.enableScalpM1) currentModeText = 'CHUYÊN SCALP M1 LIÊN TỤC (TP 2.5U, SL 7U)';
     else if (this.enableHold) currentModeText = 'CHỈ GIAO DỊCH HOLD DÀI (H1/H4)';
+    else if (this.enableScalp) currentModeText = 'CHỈ GIAO DỊCH SCALP M15';
+
+    const lotCfg = this.getLotConfig();
 
     return [
-      `⚙️ [CẤU HÌNH CHẾ ĐỘ GIAO DỊCH BOT]`,
-      `• Chế độ SCALP (M1/M5): ${scalpTag}`,
-      `  - Đặc điểm: Lướt sóng ngắn, SL 4 giá, TP 6 giá, dương 2 giá dời hòa vốn`,
-      `• Chế độ HOLD DÀI (H1/H4): ${holdTag}`,
-      `  - Đặc điểm: Gồng theo xu hướng lớn, SL 8 giá, TP 18 giá`,
+      `⚙️ [CẤU HÌNH CHẾ ĐỘ GIAO DỊCH & QUẢN TRỊ LOT]`,
+      `• Tính năng SCALP M1 LIÊN TỤC: ${scalpM1Tag}`,
+      `  - Cấu hình: TP ${this.scalpM1TpUSD} giá (2-3 USD) | SL ${this.scalpM1SlUSD} giá (7 USD)`,
+      `  - Tần suất: Quét nến liên tục mỗi ${this.scalpM1IntervalSec}s trên M1`,
+      `• Chế độ HOLD DÀI (H1/H4 - Chuẩn): ${holdTag}`,
+      `  - Đặc điểm: Gồng theo xu hướng lớn, SL 15 giá, TP 30 giá (R:R 1:2), dời BE khi +10u, khóa lãi +6u khi +15u`,
+      `• Chế độ SCALP M15: ${scalpTag}`,
       `• Trạng thái hiện tại: 👉 ${currentModeText}`,
-      `\n💡 Lệnh nhanh: /scalp on|off, /hold on|off hoặc bấm các nút bên dưới:`
+      ``,
+      `📊 [CẤU HÌNH LOT & SỐ LỆNH VÀO]`,
+      `• Khối lượng vào lệnh mặc định: ${lotCfg.defaultLot} lot`,
+      `• Khối lượng tối đa 1 lệnh: ${lotCfg.maxLot} lot`,
+      `• Khối lượng tổng tối đa: ${lotCfg.maxTotalLot} lot`,
+      `• Số lệnh tối đa cùng lúc: ${lotCfg.maxConcurrentTrades} lệnh (${lotCfg.maxConcurrentTrades > 1 ? 'Cho phép nhiều lệnh' : 'Chỉ 1 lệnh duy nhất'})`,
+      `\n💡 Lệnh nhanh: /lot <số>, /maxorders <số>, /scalpm1 on|off, /scalp config <tp> <sl>, /hold on|off:`
     ].join('\n');
   }
 
@@ -357,11 +483,14 @@ export class OrderManager {
     return {
       inline_keyboard: [
         [
-          { text: `⚡ Scalp: ${this.enableScalp ? 'Đang BẬT 🟢 (Bấm tắt)' : 'Đang TẮT 🔴 (Bấm bật)'}`, callback_data: 'TOGGLE_SCALP' },
-          { text: `📈 Hold dài: ${this.enableHold ? 'Đang BẬT 🟢 (Bấm tắt)' : 'Đang TẮT 🔴 (Bấm bật)'}`, callback_data: 'TOGGLE_HOLD' }
+          { text: `⚡ Scalp M1 (TP 2.5u | SL 7u): ${this.enableScalpM1 ? 'BẬT 🟢' : 'TẮT 🔴'}`, callback_data: 'TOGGLE_SCALP_M1' },
+          { text: `📈 Hold dài: ${this.enableHold ? 'BẬT 🟢' : 'TẮT 🔴'}`, callback_data: 'TOGGLE_HOLD' }
         ],
         [
-          { text: '🎯 Bật Cả Hai (Full)', callback_data: 'MODE_BOTH' },
+          { text: '⚡ Chuyên Scalp M1', callback_data: 'MODE_SCALP_M1_ONLY' },
+          { text: '🎯 Chuyên Hold H1', callback_data: 'MODE_HOLD_ONLY' }
+        ],
+        [
           { text: '⏸️ Tắt Hết (Chỉ Xem)', callback_data: 'MODE_OFF' }
         ]
       ]
@@ -378,12 +507,16 @@ export class OrderManager {
   async checkAndHandleTrendReversal(signal, currentPrice, notifyChatIds = []) {
     if (!this.autoCloseOnTrendReversal || !signal) return;
 
+    // QUY TẮC AN TOÀN: Chu kỳ Scalp M1 tuyệt đối không can thiệp đóng vị thế đang chạy!
+    // Chỉ chu kỳ phân tích đa khung thời gian H4/H1 mới có thẩm quyền đánh giá đảo chiều xu hướng lớn.
+    if (signal.tradeStyle === 'SCALP_M1' || signal.timeframe === 'M1') {
+      return;
+    }
+
     const openPositions = this.bridge.accountInfo?.openPositionsList || [];
     if (!Array.isArray(openPositions) || openPositions.length === 0) return;
 
-    const newTrend = signal.trend || 'SIDEWAY';
-    const isNewBuy = signal.action === 'BUY' || newTrend === 'UP';
-    const isNewSell = signal.action === 'SELL' || newTrend === 'DOWN';
+    const h4Trend = signal.h4Trend || signal.trend || 'SIDEWAY';
 
     const targetChatIds = (notifyChatIds && notifyChatIds.length > 0)
       ? notifyChatIds
@@ -392,23 +525,31 @@ export class OrderManager {
     for (const pos of openPositions) {
       const posType = String(pos.type || '').toUpperCase();
       const posSymbol = pos.symbol || 'XAUUSD';
+      const posComment = String(pos.comment || '');
+
+      // QUY TẮC BẢO VỆ LỆNH SCALP:
+      // Lệnh Scalp M1 có SL/TP ngắn cố định riêng. Tuyệt đối không can thiệp ngắt sớm lệnh Scalp bằng xu hướng H4!
+      if (posComment.includes('SCALP') || posComment.includes('AI_SCALP_M1')) {
+        continue;
+      }
+
       let shouldClose = false;
       let closeReason = '';
 
-      // Trường hợp 1: Đang giữ lệnh SELL mà xu hướng đảo chiều sang TĂNG (hoặc có tín hiệu BUY)
-      if (posType === 'SELL' && (isNewBuy || (signal.reversalDetected && newTrend !== 'DOWN'))) {
-        shouldClose = true;
-        closeReason = signal.reversalReason || `Xu hướng đảo chiều sang TĂNG (${newTrend}), bẻ gãy cấu trúc giảm cũ`;
-      }
-
-      // Trường hợp 2: Đang giữ lệnh BUY mà xu hướng đảo chiều sang GIẢM (hoặc có tín hiệu SELL)
-      if (posType === 'BUY' && (isNewSell || (signal.reversalDetected && newTrend !== 'UP'))) {
-        shouldClose = true;
-        closeReason = signal.reversalReason || `Xu hướng đảo chiều sang GIẢM (${newTrend}), bẻ gãy cấu trúc tăng cũ`;
+      // Chỉ ngắt vị thế HOLD khi AI xác nhận ĐẢO CHIỀU CẤU TRÚC (MSS / ChoCH)
+      // TUYỆT ĐỐI không ngắt lệnh khi thị trường chỉ đang pullback điều chỉnh tự nhiên trong sóng!
+      if (signal.reversalDetected) {
+        if (posType === 'SELL' && h4Trend === 'UP') {
+          shouldClose = true;
+          closeReason = signal.reversalReason || `Xu hướng H4/H1 đảo chiều phá vỡ cấu trúc giảm sang TĂNG (MSS)`;
+        } else if (posType === 'BUY' && h4Trend === 'DOWN') {
+          shouldClose = true;
+          closeReason = signal.reversalReason || `Xu hướng H4/H1 đảo chiều phá vỡ cấu trúc tăng sang GIẢM (MSS)`;
+        }
       }
 
       if (shouldClose) {
-        this.logger(`[OrderManager] 🚨 PHÁT HIỆN ĐẢO CHIỀU XU HƯỚNG! Tiến hành tự động ngắt vị thế #${pos.ticket} (${posType} ${pos.lot} lot ${posSymbol}). Lý do: ${closeReason}`);
+        this.logger(`[OrderManager] 🚨 PHÁT HIỆN ĐẢO CHIỀU XU HƯỚNG CẤU TRÚC! Tiến hành tự động ngắt vị thế #${pos.ticket} (${posType} ${pos.lot} lot ${posSymbol}). Lý do: ${closeReason}`);
 
         // Đẩy lệnh đóng sang MT5
         this.bridge.queueCloseOrder({
@@ -426,7 +567,7 @@ export class OrderManager {
           `• Vị thế: ${posType} ${pos.lot} Lot ${posSymbol}`,
           `• Giá vào: ${pos.open || '-'} USD | Hiện tại: ${pos.current || currentPrice || '-'} USD`,
           `• Lời/Lỗ tạm tính: ${profitStr} USD`,
-          `• Xu hướng mới: ${newTrend}`,
+          `• Xu hướng mới: ${h4Trend}`,
           `• Lý do ngắt lệnh: ${closeReason}`,
           `• Hành động: Đã đóng lệnh ngay để bảo toàn vốn, tránh nguy cơ chạm Stop Loss!`
         ].join('\n');

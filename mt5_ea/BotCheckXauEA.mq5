@@ -25,24 +25,35 @@ input group "=== QUẢN TRỊ RỦI RO & KHỐI LƯỢNG ==="
 input double   InpMaxTotalLot          = 0.02;                    // Tổng volume tối đa cho phép (Max Total Lot)
 input bool     InpAllowConcurrentOrders= false;                   // Cho phép nhiều lệnh cùng lúc (false = chỉ 1 lệnh)
 
-input group "=== QUẢN LÝ DỜI SL HÒA VỐN (BREAKEVEN) & CHỐT LỜI ==="
+input group "=== QUẢN LÝ DỜI SL HÒA VỐN & KHÓA LÃI DƯƠNG ==="
 input bool     InpEnableBreakeven      = true;                    // Kích hoạt tự động dời SL về hòa vốn
-input double   InpBreakevenTriggerUSD  = 2.0;                     // Đạt lãi từ bao nhiêu USD thì dời SL (mặc định 2.0 USD)
-input double   InpBreakevenOffsetUSD   = 0.2;                     // Offset bảo vệ phí sàn/spread (mặc định 0.2 USD)
-input double   InpAutoCloseProfitUSD   = 0.0;                     // Cắt lệnh theo lợi nhuận USD (đặt 0.0 để tắt, cho lệnh chạy tới TP 6.0 USD)
+input double   InpBreakevenTriggerUSD  = 10.0;                    // Đạt lãi từ bao nhiêu USD thì dời SL (mặc định 10.0 USD)
+input double   InpBreakevenOffsetUSD   = 1.0;                     // Offset bảo vệ phí sàn/spread (mặc định 1.0 USD)
+input bool     InpEnableLockProfit     = true;                    // Kích hoạt dời SL khóa lãi dương (+15u -> SL +6u)
+input double   InpLockProfitTriggerUSD = 15.0;                    // Đạt lãi từ bao nhiêu USD thì khóa lãi (+15.0 USD)
+input double   InpLockProfitOffsetUSD  = 6.0;                     // Mức SL khóa lãi dương (+6.0 USD)
+input double   InpAutoCloseProfitUSD   = 0.0;                     // Cắt lệnh theo lợi nhuận USD (đặt 0.0 để tắt, cho lệnh chạy tới TP 30.0 USD)
 
 input group "=== BẢO VỆ VỐN & NGẮT MẠCH KHẨN CẤP (CIRCUIT BREAKER) ==="
 input bool     InpEnableCircuitBreaker = true;                    // Kích hoạt ngắt mạch bảo vệ vốn khi chạm ngưỡng lỗ
-input double   InpInitialCapitalUSD    = 1000.0;                  // Vốn mục tiêu/vốn cơ sở (1000 USD)
-input double   InpMaxLossUSD           = 300.0;                   // Mức lỗ tối đa cho phép dừng giao dịch (300 USD)
-input double   InpMaxDrawdownPercent   = 30.0;                    // Mức sụt giảm tối đa (% vốn cơ sở, 30%)
+input double   InpInitialCapitalUSD    = 300.0;                   // Vốn mục tiêu/vốn cơ sở (300 USD)
+input double   InpMaxLossUSD           = 150.0;                   // Mức lỗ tối đa cho phép dừng giao dịch (150 USD tương đương 50% vốn)
+input double   InpMaxDrawdownPercent   = 50.0;                    // Mức sụt giảm tối đa (% vốn cơ sở, 50%)
 input bool     InpCloseAllOnBreach     = true;                    // Tự động đóng tất cả vị thế khi vi phạm ngưỡng lỗ
+
+// Biến cấu hình có thể đồng bộ động từ Node.js .env
+double g_breakevenTriggerUSD   = 10.0;
+double g_breakevenOffsetUSD    = 1.0;
+double g_lockProfitTriggerUSD  = 15.0;
+double g_lockProfitOffsetUSD   = 6.0;
 
 // Biến lưu thời gian nhịp tim gần nhất (dùng mili-giây độc lập với tick thị trường)
 ulong  g_lastHeartbeatMs = 0;
 bool   g_circuitBreakerLocked = false;
 double g_startEquity = 0.0;
 double g_peakEquity = 0.0;
+double g_baseCapital = 300.0;
+double g_maxLossUSD = 150.0;
 
 
 //+------------------------------------------------------------------+
@@ -71,8 +82,31 @@ int OnInit()
    g_startEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    g_peakEquity  = g_startEquity;
    g_circuitBreakerLocked = false;
+   g_baseCapital = InpInitialCapitalUSD;
+   g_maxLossUSD  = InpMaxLossUSD;
+
+   // Tự động đồng bộ g_baseCapital nếu bị lệch quá xa so với vốn thực tế của tài khoản (tránh load template cũ 1000 USD)
+   if(g_baseCapital <= 0.0 || MathAbs(g_startEquity - g_baseCapital) > (g_baseCapital * 0.5))
+   {
+      g_baseCapital = g_startEquity;
+      if(InpMaxDrawdownPercent > 0)
+         g_maxLossUSD = g_baseCapital * (InpMaxDrawdownPercent / 100.0);
+   }
+
    Print("🛡️ [BẢO VỆ VỐN] Mốc vốn ban đầu: $", DoubleToString(g_startEquity, 2), 
-         " USD | Ngưỡng lỗ tối đa: -$", DoubleToString(InpMaxLossUSD, 2), " USD (", DoubleToString(InpMaxDrawdownPercent, 1), "%)");
+         " USD | Vốn cơ sở: $", DoubleToString(g_baseCapital, 2),
+         " USD | Ngưỡng lỗ tối đa: -$", DoubleToString(g_maxLossUSD, 2), " USD (", DoubleToString(InpMaxDrawdownPercent, 1), "%)");
+
+   // Khởi tạo các mốc dời SL hòa vốn & khóa lãi
+   g_breakevenTriggerUSD   = InpBreakevenTriggerUSD;
+   g_breakevenOffsetUSD    = InpBreakevenOffsetUSD;
+   g_lockProfitTriggerUSD  = InpLockProfitTriggerUSD;
+   g_lockProfitOffsetUSD   = InpLockProfitOffsetUSD;
+
+   Print("🎯 [QUẢN LÝ LÃI] Hòa vốn: Lãi >= +$", DoubleToString(g_breakevenTriggerUSD, 1), 
+         " USD -> SL +", DoubleToString(g_breakevenOffsetUSD, 1), 
+         " USD | Khóa lãi: Lãi >= +$", DoubleToString(g_lockProfitTriggerUSD, 1), 
+         " USD -> SL dương +", DoubleToString(g_lockProfitOffsetUSD, 1), " USD");
 
    // Gửi nhịp tim đầu tiên báo danh tài khoản
    SendHeartbeat();
@@ -221,6 +255,8 @@ void CheckCircuitBreakerProtection()
 
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    if(equity <= 0) return;
+   // Lọc lỗi rớt mạng tức thời của MT5 (equity tụt về 0 hoặc số ảo khi mất kết nối máy chủ)
+   if(g_peakEquity > 10000.0 && equity < 1000.0) return;
 
    if(g_startEquity <= 0)
    {
@@ -231,33 +267,27 @@ void CheckCircuitBreakerProtection()
    if(equity > g_peakEquity) g_peakEquity = equity;
 
    // 1. Sụt giảm từ đỉnh (Peak Drawdown)
-   double peakDrawdown = g_peakEquity - equity;
+   double peakDrawdown = (g_peakEquity > equity) ? (g_peakEquity - equity) : 0.0;
    // 2. Sụt giảm từ đầu phiên chạy (Session Drawdown)
-   double sessionDrawdown = g_startEquity - equity;
+   double sessionDrawdown = (g_startEquity > equity) ? (g_startEquity - equity) : 0.0;
    double currentDrawdown = MathMax(peakDrawdown, sessionDrawdown);
 
    bool isBreached = false;
    string reason = "";
 
-   if(currentDrawdown >= InpMaxLossUSD)
+   // Vốn cơ sở tính toán
+   double baseCapital = (g_baseCapital > 0) ? g_baseCapital : ((g_startEquity > 0) ? g_startEquity : equity);
+
+   double maxAllowedLoss = (InpMaxDrawdownPercent > 0 && baseCapital > 0)
+                           ? (baseCapital * (InpMaxDrawdownPercent / 100.0))
+                           : g_maxLossUSD;
+
+   if(maxAllowedLoss > 0 && currentDrawdown >= maxAllowedLoss)
    {
       isBreached = true;
-      reason = StringFormat("Sut giam -$%.2f USD vuot nguong lo cho phep -$%.2f USD!", currentDrawdown, InpMaxLossUSD);
-   }
-   else if(InpMaxDrawdownPercent > 0)
-   {
-      double baseCapital = (InpInitialCapitalUSD > 0 && MathAbs(equity - InpInitialCapitalUSD) < InpInitialCapitalUSD)
-                           ? InpInitialCapitalUSD
-                           : g_peakEquity;
-      if(baseCapital > 0)
-      {
-         double ddPct = (baseCapital - equity) / baseCapital * 100.0;
-         if(ddPct >= InpMaxDrawdownPercent)
-         {
-            isBreached = true;
-            reason = StringFormat("Sut giam -%.1f%% vuot nguong toi da -%.1f%% von (Co so: $%.2f USD)!", ddPct, InpMaxDrawdownPercent, baseCapital);
-         }
-      }
+      double ddPct = baseCapital > 0 ? (currentDrawdown / baseCapital * 100.0) : InpMaxDrawdownPercent;
+      reason = StringFormat("Sut giam -$%.2f USD (-%.1f%%) vuot nguong dung lo cho phep (Co so: $%.2f USD, Nguong dung lo: -$%.2f USD)!",
+                            currentDrawdown, ddPct, baseCapital, maxAllowedLoss);
    }
 
    if(isBreached)
@@ -304,11 +334,11 @@ void CheckAutoCloseByProfit()
 }
 
 //+------------------------------------------------------------------+
-//| Tự động quét và dời SL về mức hòa vốn (Breakeven)               |
+//| Tự động quét và dời SL về Hòa Vốn & Khóa Lãi Dương (+15u -> +6u) |
 //+------------------------------------------------------------------+
 void CheckAndApplyBreakeven()
 {
-   if(!InpEnableBreakeven || InpBreakevenTriggerUSD <= 0) return;
+   if(!InpEnableBreakeven && !InpEnableLockProfit) return;
 
    int positions = PositionsTotal();
    for(int i = positions - 1; i >= 0; i--)
@@ -322,7 +352,27 @@ void CheckAndApplyBreakeven()
          continue;
 
       double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      if(profit < InpBreakevenTriggerUSD) continue;
+
+      // Xác định mục tiêu dời SL:
+      // Chặng 2 (Ưu tiên cao hơn): Nếu lãi >= g_lockProfitTriggerUSD (15.0 USD) -> Khóa lãi dương g_lockProfitOffsetUSD (+6.0 USD)
+      // Chặng 1: Nếu lãi >= g_breakevenTriggerUSD (10.0 USD) -> Dời hòa vốn + g_breakevenOffsetUSD (+1.0 USD)
+      double targetOffset = 0.0;
+      string slStage = "";
+
+      if(InpEnableLockProfit && g_lockProfitTriggerUSD > 0 && profit >= g_lockProfitTriggerUSD)
+      {
+         targetOffset = g_lockProfitOffsetUSD; // Khóa lãi dương 6.0 USD
+         slStage = "LOCK_PROFIT";
+      }
+      else if(InpEnableBreakeven && g_breakevenTriggerUSD > 0 && profit >= g_breakevenTriggerUSD)
+      {
+         targetOffset = g_breakevenOffsetUSD; // Hòa vốn 1.0 USD
+         slStage = "BREAKEVEN";
+      }
+      else
+      {
+         continue; // Chưa đạt mốc nào
+      }
 
       long type         = PositionGetInteger(POSITION_TYPE);
       double openPrice  = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -339,10 +389,10 @@ void CheckAndApplyBreakeven()
 
       if(type == POSITION_TYPE_BUY)
       {
-         // Với lệnh BUY: SL hòa vốn = Giá vào + InpBreakevenOffsetUSD
-         targetSl = openPrice + InpBreakevenOffsetUSD;
+         // Với lệnh BUY: SL = Giá vào + targetOffset
+         targetSl = openPrice + targetOffset;
 
-         // Nếu SL hiện tại chưa có (currentSl <= 0) hoặc SL hiện tại còn dưới mức hòa vốn
+         // Nếu SL hiện tại chưa có (currentSl <= 0) hoặc SL hiện tại còn dưới targetSl
          if(currentSl < (targetSl - (0.5 * point)))
          {
             // Kiểm tra an toàn: targetSl phải thấp hơn giá Bid hiện tại ít nhất stopsLevel
@@ -354,10 +404,10 @@ void CheckAndApplyBreakeven()
       }
       else if(type == POSITION_TYPE_SELL)
       {
-         // Với lệnh SELL: SL hòa vốn = Giá vào - InpBreakevenOffsetUSD
-         targetSl = openPrice - InpBreakevenOffsetUSD;
+         // Với lệnh SELL: SL = Giá vào - targetOffset
+         targetSl = openPrice - targetOffset;
 
-         // Nếu SL hiện tại chưa có (currentSl <= 0) hoặc SL hiện tại còn trên mức hòa vốn
+         // Nếu SL hiện tại chưa có (currentSl <= 0) hoặc SL hiện tại còn trên targetSl
          if(currentSl <= 0.0 || currentSl > (targetSl + (0.5 * point)))
          {
             // Kiểm tra an toàn: targetSl phải cao hơn giá Ask hiện tại ít nhất stopsLevel
@@ -387,14 +437,24 @@ void CheckAndApplyBreakeven()
          bool success = OrderSend(request, result);
          if(success && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
          {
-            Print("🛡️ [DỜI SL HÒA VỐN] Thành công! Ticket #", ticket, " SL đã dời về ", targetSl, 
-                  " (Giá vào: ", openPrice, ", Lãi hiện tại: +$", DoubleToString(profit, 2), " USD)");
-            SendExecutionReport(IntegerToString(ticket), "BREAKEVEN", ticket, targetSl, 
-                  StringFormat("SL hoa von: %.2f (Lai: +$%.2f USD)", targetSl, profit));
+            if(slStage == "LOCK_PROFIT")
+            {
+               Print("🎯 [KHÓA LÃI DƯƠNG +", DoubleToString(targetOffset, 1), " USD] Thành công! Ticket #", ticket, " SL đã dời về ", targetSl, 
+                     " (Giá vào: ", openPrice, ", Lãi hiện tại: +$", DoubleToString(profit, 2), " USD)");
+               SendExecutionReport(IntegerToString(ticket), "LOCK_PROFIT", ticket, targetSl, 
+                     StringFormat("Khoa lai: %.2f (Lai: +$%.2f USD, SL duong +$%.2f USD)", targetSl, profit, targetOffset));
+            }
+            else
+            {
+               Print("🛡️ [DỜI SL HÒA VỐN] Thành công! Ticket #", ticket, " SL đã dời về ", targetSl, 
+                     " (Giá vào: ", openPrice, ", Lãi hiện tại: +$", DoubleToString(profit, 2), " USD)");
+               SendExecutionReport(IntegerToString(ticket), "BREAKEVEN", ticket, targetSl, 
+                     StringFormat("SL hoa von: %.2f (Lai: +$%.2f USD)", targetSl, profit));
+            }
          }
          else
          {
-            Print("⚠️ [DỜI SL HÒA VỐN] Thất bại lệnh #", ticket, "! Retcode: ", result.retcode, " (", result.comment, ") Err: ", GetLastError());
+            Print("⚠️ [DỜI SL ", slStage, "] Thất bại lệnh #", ticket, "! Retcode: ", result.retcode, " (", result.comment, ") Err: ", GetLastError());
          }
       }
    }
@@ -443,6 +503,115 @@ void PollAndExecuteSignal()
 
    if(orderId == "" || action == "") return;
 
+   // Xử lý lệnh mở khóa Circuit Breaker từ Dashboard hoặc AI (UNLOCK / RESET_CIRCUIT_BREAKER)
+   if(action == "UNLOCK" || action == "RESET_CIRCUIT_BREAKER")
+   {
+      g_circuitBreakerLocked = false;
+      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+      g_startEquity = eq;
+      g_peakEquity = eq;
+      g_baseCapital = eq;
+      if(InpMaxDrawdownPercent > 0)
+         g_maxLossUSD = g_baseCapital * (InpMaxDrawdownPercent / 100.0);
+      Print("🔓 [CIRCUIT BREAKER UNLOCKED] Đã mở khóa bảo vệ vốn và reset mốc vốn cơ sở về: $", DoubleToString(eq, 2), " USD");
+      SendExecutionReport(orderId, "UNLOCKED", 0, eq, "Da mo khoa Circuit Breaker thanh cong");
+      return;
+   }
+
+   // Xử lý dời SL về hòa vốn (MOVE_SL_BE)
+   if(action == "MOVE_SL_BE")
+   {
+      int modifiedCount = 0;
+      int totalPos = PositionsTotal();
+      string tradeSym = ResolveSymbol(symbol != "" ? symbol : "XAUUSD");
+      for(int i = totalPos - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t > 0)
+         {
+            string pSym = PositionGetString(POSITION_SYMBOL);
+            if(pSym == tradeSym || StringFind(pSym, "XAU") >= 0 || StringFind(pSym, "GOLD") >= 0)
+            {
+               double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+               double currentTp = PositionGetDouble(POSITION_TP);
+               int digits = (int)SymbolInfoInteger(pSym, SYMBOL_DIGITS);
+
+               MqlTradeRequest req;
+               MqlTradeResult  res;
+               ZeroMemory(req);
+               ZeroMemory(res);
+               req.action = TRADE_ACTION_SLTP;
+               req.position = t;
+               req.symbol = pSym;
+               req.sl = NormalizeDouble(openPrice, digits);
+               req.tp = NormalizeDouble(currentTp, digits);
+               ResetLastError();
+               if(OrderSend(req, res)) modifiedCount++;
+            }
+         }
+      }
+      Print("🛡️ [DỜI SL HÒA VỐN] Đã dời SL về BE cho ", modifiedCount, " vị thế.");
+      SendExecutionReport(orderId, "SL_BE_APPLIED", (ulong)modifiedCount, 0, "Da doi SL ve hoa von");
+      return;
+   }
+
+   // Xử lý cập nhật SL/TP linh động (UPDATE_SL_TP)
+   if(action == "UPDATE_SL_TP")
+   {
+      int totalPos = PositionsTotal();
+      string tradeSym = ResolveSymbol(symbol != "" ? symbol : "XAUUSD");
+      int modifiedCount = 0;
+      for(int i = totalPos - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t > 0)
+         {
+            string pSym = PositionGetString(POSITION_SYMBOL);
+            if(pSym == tradeSym || StringFind(pSym, "XAU") >= 0 || StringFind(pSym, "GOLD") >= 0)
+            {
+               int digits = (int)SymbolInfoInteger(pSym, SYMBOL_DIGITS);
+               double curSl = PositionGetDouble(POSITION_SL);
+               double curTp = PositionGetDouble(POSITION_TP);
+               double newSl = (sl > 0) ? NormalizeDouble(sl, digits) : curSl;
+               double newTp = (tp > 0) ? NormalizeDouble(tp, digits) : curTp;
+
+               MqlTradeRequest req;
+               MqlTradeResult  res;
+               ZeroMemory(req);
+               ZeroMemory(res);
+               req.action = TRADE_ACTION_SLTP;
+               req.position = t;
+               req.symbol = pSym;
+               req.sl = newSl;
+               req.tp = newTp;
+               ResetLastError();
+               if(OrderSend(req, res)) modifiedCount++;
+            }
+         }
+      }
+      Print("🔄 [CẬP NHẬT SL/TP] Đã cập nhật cho ", modifiedCount, " vị thế.");
+      SendExecutionReport(orderId, "SL_TP_UPDATED", (ulong)modifiedCount, 0, "Da cap nhat SL TP");
+      return;
+   }
+
+   // Xử lý hủy toàn bộ lệnh chờ (CANCEL_ALL_PENDING)
+   if(action == "CANCEL_ALL_PENDING")
+   {
+      int cancelledCount = 0;
+      int totalOrders = OrdersTotal();
+      for(int i = totalOrders - 1; i >= 0; i--)
+      {
+         ulong t = OrderGetTicket(i);
+         if(t > 0)
+         {
+            if(CancelPendingOrder(t)) cancelledCount++;
+         }
+      }
+      Print("🗑️ [HỦY TẤT CẢ LỆNH CHỜ] Đã hủy ", cancelledCount, " lệnh chờ trên MT5.");
+      SendExecutionReport(orderId, "ALL_PENDING_CANCELLED", (ulong)cancelledCount, 0, "Da huy tat ca lenh cho");
+      return;
+   }
+
    // Xử lý lệnh khẩn cấp CLOSE_ALL từ Circuit Breaker
    if(action == "CLOSE_ALL")
    {
@@ -490,8 +659,132 @@ void PollAndExecuteSignal()
       return;
    }
 
+   // Xử lý hủy lệnh chờ Pending Order (CANCEL_PENDING / CANCEL_ORDER)
+   if(action == "CANCEL_PENDING" || action == "CANCEL_ORDER")
+   {
+      ulong cancelTicket = (ulong)StringToInteger(ExtractJsonValue(response, "ticket"));
+      if(cancelTicket > 0)
+      {
+         bool cOk = CancelPendingOrder(cancelTicket);
+         if(cOk) SendExecutionReport(orderId, "CANCELLED", cancelTicket, 0, "Da huy lenh cho thanh cong");
+         else SendExecutionReport(orderId, "CANCEL_FAILED", cancelTicket, 0, "Huy lenh cho that bai");
+      }
+      return;
+   }
+
    string tradeSymbol = ResolveSymbol(symbol);
+
+   // Xử lý lệnh chờ Pending Limit (BUY_LIMIT / SELL_LIMIT)
+   if(action == "BUY_LIMIT" || action == "SELL_LIMIT")
+   {
+      ExecutePendingOrder(orderId, action, tradeSymbol, lot, entryPrice, sl, tp, comment);
+      return;
+   }
+
    ExecuteMarketOrder(orderId, action, tradeSymbol, lot, sl, tp, entryPrice, comment);
+}
+
+//+------------------------------------------------------------------+
+//| Hủy lệnh chờ (Pending Order)                                     |
+//+------------------------------------------------------------------+
+bool CancelPendingOrder(ulong orderTicket)
+{
+   MqlTradeRequest request;
+   MqlTradeResult  result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+
+   request.action = TRADE_ACTION_REMOVE;
+   request.order  = orderTicket;
+
+   ResetLastError();
+   bool ok = OrderSend(request, result);
+   if(ok && result.retcode == TRADE_RETCODE_DONE)
+   {
+      Print("✅ [MT5 Pending] Đã hủy thành công lệnh chờ #", orderTicket);
+      return true;
+   }
+   Print("❌ [MT5 Pending] Hủy lệnh chờ #", orderTicket, " thất bại. Retcode: ", result.retcode);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Thực thi lệnh chờ Limit (BUY_LIMIT / SELL_LIMIT)                 |
+//+------------------------------------------------------------------+
+void ExecutePendingOrder(string orderId, string action, string symbol, double lot, double price, double sl, double tp, string comment)
+{
+   // 0. Kiểm tra ngắt mạch bảo vệ vốn (Circuit Breaker)
+   if(g_circuitBreakerLocked)
+   {
+      string rejectReason = "Tu choi dat limit: Tai khoan dang bi KHOA BAO VE VON (Circuit Breaker da kich hoat)!";
+      Print("🚨 [MT5 Risk] ", rejectReason);
+      SendExecutionReport(orderId, "REJECTED", 0, 0, rejectReason);
+      return;
+   }
+
+   // 1. Kiểm tra quy tắc lệnh chưa đóng nếu không cho phép đồng thời
+   int currentPositions = PositionsTotal();
+   if(!InpAllowConcurrentOrders && currentPositions > 0)
+   {
+      string rejectReason = StringFormat("Tu choi dat limit: Dang co %d vi the chua dong! Quy tac: Khong vao lenh moi khi lenh truoc chua dong.", currentPositions);
+      Print("⚠️ [MT5 Risk] ", rejectReason);
+      SendExecutionReport(orderId, "REJECTED", 0, 0, rejectReason);
+      return;
+   }
+
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   price = NormalizeDouble(price, digits);
+   if(price <= 0)
+   {
+      string rejectReason = "Gia dat limit khong hop le (<= 0)!";
+      Print("⚠️ [MT5 Risk] ", rejectReason);
+      SendExecutionReport(orderId, "REJECTED", 0, 0, rejectReason);
+      return;
+   }
+
+   MqlTradeRequest request;
+   MqlTradeResult  result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+
+   request.action = TRADE_ACTION_PENDING;
+   request.symbol = symbol;
+   request.volume = lot;
+   request.magic  = InpMagicNumber;
+   request.price  = price;
+
+   uint filling = (uint)SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
+   if((filling & SYMBOL_FILLING_FOK) != 0) request.type_filling = ORDER_FILLING_FOK;
+   else if((filling & SYMBOL_FILLING_IOC) != 0) request.type_filling = ORDER_FILLING_IOC;
+   else request.type_filling = ORDER_FILLING_RETURN;
+
+   if(action == "BUY_LIMIT")
+   {
+      request.type = ORDER_TYPE_BUY_LIMIT;
+   }
+   else if(action == "SELL_LIMIT")
+   {
+      request.type = ORDER_TYPE_SELL_LIMIT;
+   }
+   else return;
+
+   if(sl > 0) request.sl = NormalizeDouble(sl, digits);
+   if(tp > 0) request.tp = NormalizeDouble(tp, digits);
+   request.comment = (comment != "") ? comment : StringFormat("BotCheckXau_%s", action);
+
+   ResetLastError();
+   bool ok = OrderSend(request, result);
+   if(ok && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
+   {
+      Print("✅ [MT5 Pending] Đã đặt thành công lệnh chờ ", action, " #", result.order, " ", lot, " lot @ ", price, " SL: ", sl, " TP: ", tp);
+      SendExecutionReport(orderId, "PLACED", result.order, price, StringFormat("Order #%I64u placed", result.order));
+   }
+   else
+   {
+      string errReason = StringFormat("Loi dat limit (retcode %d): %s", result.retcode, result.comment != "" ? result.comment : IntegerToString(result.retcode));
+      Print("❌ [MT5 Pending] ", errReason);
+      SendExecutionReport(orderId, "FAILED", 0, 0, errReason);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -565,9 +858,9 @@ void ExecuteMarketOrder(string orderId, string action, string symbol, double lot
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    double stopsLevel = (double)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
    
-   // Xác định khoảng cách dừng lỗ và chốt lời mong muốn (tính theo USD)
-   double slDist = 4.0; // Mặc định 4 giá (SL 4 USD)
-   double tpDist = 6.0; // Mặc định 6 giá (TP 6 USD, R:R 1:1.5)
+   // Xác định khoảng cách dừng lỗ và chốt lời mong muốn
+   double slDist = 15.0; // Mặc định 15 giá (Hold dài)
+   double tpDist = 30.0; // Mặc định 30 giá (Hold dài)
    
    if(entryPrice > 0 && sl > 0)
       slDist = MathAbs(entryPrice - sl);
@@ -579,9 +872,22 @@ void ExecuteMarketOrder(string orderId, string action, string symbol, double lot
    else if(tp > 0)
       tpDist = MathAbs(tp - price);
 
-   // Đảm bảo khoảng cách hợp lý
-   if(slDist < 1.0) slDist = 4.0;
-   if(tpDist < 0.5) tpDist = 6.0;
+   // Nhận diện phong cách giao dịch từ comment hoặc khoảng cách đặt lệnh (Scalp M1 vs Hold)
+   bool isScalpOrder = (StringFind(comment, "SCALP") >= 0 || StringFind(comment, "M1") >= 0 || (slDist > 0 && slDist <= 7.5));
+
+   // Nếu là lệnh SCALP (hoặc Scalp M1): Tôn trọng SL 7 giá và TP 2-3 giá theo đúng cấu hình
+   if(isScalpOrder)
+   {
+      if(slDist <= 0 || slDist < 3.0) slDist = 7.0; // Mặc định SL 7 giá cho Scalp
+      if(tpDist <= 0 || tpDist < 1.0) tpDist = 2.5; // Mặc định TP 2.5 giá cho Scalp
+      Print("⚡ [MT5 Scalp] Nhận diện lệnh SCALP M1: SL = ", DoubleToString(slDist, 1), " giá | TP = ", DoubleToString(tpDist, 1), " giá");
+   }
+   else
+   {
+      // Chế độ Hold dài mặc định: Tối thiểu 8 giá SL, 15 giá TP
+      if(slDist < 8.0) slDist = 15.0;
+      if(tpDist < 15.0) tpDist = 30.0;
+   }
 
    // LUÔN TÍNH SL VÀ TP CỐ ĐỊNH THEO GIÁ KHỚP THỰC TẾ (price) TRÊN SÀN MT5
    // Triệt tiêu hoàn toàn hiện tượng trượt giá (Slippage) làm bóp nghẹt khoảng cách SL
@@ -729,6 +1035,31 @@ void SendHeartbeat()
    }
    openPosJson += "]";
 
+   // 1b. Quét danh sách các lệnh chờ (Pending Orders)
+   int totalPending = OrdersTotal();
+   string pendingOrdersJson = "[";
+   int pendingCount = 0;
+   for(int i = 0; i < totalPending; i++)
+   {
+      ulong orderTicket = OrderGetTicket(i);
+      if(orderTicket > 0)
+      {
+         string pSym = OrderGetString(ORDER_SYMBOL);
+         long pType = OrderGetInteger(ORDER_TYPE);
+         double pVol = OrderGetDouble(ORDER_VOLUME_CURRENT);
+         double pPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+         double pSl = OrderGetDouble(ORDER_SL);
+         double pTp = OrderGetDouble(ORDER_TP);
+         ulong pMagic = OrderGetInteger(ORDER_MAGIC);
+         string pTypeStr = (pType == ORDER_TYPE_BUY_LIMIT) ? "BUY_LIMIT" : (pType == ORDER_TYPE_SELL_LIMIT) ? "SELL_LIMIT" : "PENDING";
+         if(pendingCount > 0) pendingOrdersJson += ",";
+         pendingOrdersJson += StringFormat("{\"ticket\":%I64u,\"symbol\":\"%s\",\"type\":\"%s\",\"lot\":%.2f,\"price\":%.2f,\"sl\":%.2f,\"tp\":%.2f,\"magic\":%I64u}",
+            orderTicket, pSym, pTypeStr, pVol, pPrice, pSl, pTp, pMagic);
+         pendingCount++;
+      }
+   }
+   pendingOrdersJson += "]";
+
    // 2. Quét lịch sử các lệnh đã đóng trong ngày hôm nay (Closed Deals)
    MqlDateTime dt;
    TimeCurrent(dt);
@@ -796,7 +1127,7 @@ void SendHeartbeat()
       accountAlgo ? "true" : "false",
       todayProfit
    );
-   string jsonPayload = baseJson + marketPriceJson + ",\"open_positions\":" + openPosJson + ",\"closed_deals\":" + closedDealsJson + "}";
+   string jsonPayload = baseJson + marketPriceJson + ",\"open_positions\":" + openPosJson + ",\"pending_orders\":" + pendingOrdersJson + ",\"closed_deals\":" + closedDealsJson + "}";
 
    char postData[];
    StringToCharArray(jsonPayload, postData, 0, WHOLE_ARRAY, CP_UTF8);
@@ -806,7 +1137,52 @@ void SendHeartbeat()
    string resultHeaders;
    ResetLastError();
    int res = WebRequest("POST", url, headers, 2000, postData, resultData, resultHeaders);
-   if(res != 200)
+   if(res == 200 && ArraySize(resultData) > 0)
+   {
+      string responseJson = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
+
+      // Tự động đồng bộ các thông số Hòa vốn & Khóa lãi từ Node.js .env
+      string beTrigStr = ExtractJsonValue(responseJson, "breakeven_trigger_usd");
+      if(beTrigStr != "")
+      {
+         double beTrig = StringToDouble(beTrigStr);
+         if(beTrig > 0 && MathAbs(beTrig - g_breakevenTriggerUSD) > 0.01)
+         {
+            g_breakevenTriggerUSD = beTrig;
+            Print("🔄 [SYNC] Đã đồng bộ Breakeven Trigger từ Node.js .env: +$", DoubleToString(g_breakevenTriggerUSD, 1), " USD");
+         }
+      }
+
+      string beOffStr = ExtractJsonValue(responseJson, "breakeven_offset_usd");
+      if(beOffStr != "")
+      {
+         double beOff = StringToDouble(beOffStr);
+         if(beOff > 0) g_breakevenOffsetUSD = beOff;
+      }
+
+      string lockTrigStr = ExtractJsonValue(responseJson, "lock_profit_trigger_usd");
+      if(lockTrigStr != "")
+      {
+         double lockTrig = StringToDouble(lockTrigStr);
+         if(lockTrig > 0 && MathAbs(lockTrig - g_lockProfitTriggerUSD) > 0.01)
+         {
+            g_lockProfitTriggerUSD = lockTrig;
+            Print("🔄 [SYNC] Đã đồng bộ Lock Profit Trigger (+15u) từ Node.js .env: +$", DoubleToString(g_lockProfitTriggerUSD, 1), " USD");
+         }
+      }
+
+      string lockOffStr = ExtractJsonValue(responseJson, "lock_profit_offset_usd");
+      if(lockOffStr != "")
+      {
+         double lockOff = StringToDouble(lockOffStr);
+         if(lockOff > 0 && MathAbs(lockOff - g_lockProfitOffsetUSD) > 0.01)
+         {
+            g_lockProfitOffsetUSD = lockOff;
+            Print("🔄 [SYNC] Đã đồng bộ Lock Profit Offset (+6u) từ Node.js .env: +$", DoubleToString(g_lockProfitOffsetUSD, 1), " USD");
+         }
+      }
+   }
+   else if(res != 200)
    {
       Print("⚠️ [SendHeartbeat] WebRequest loi: res=", res, ", err=", GetLastError(), " len=", StringLen(jsonPayload));
    }

@@ -12,13 +12,26 @@
  * @property {number} entry Giá vào lệnh
  * @property {number} sl Giá dừng lỗ (Stop Loss)
  * @property {number} tp Giá chốt lời (Take Profit)
+ * @property {number} [tp1] Giá chốt lời mục tiêu 1 (Fib -0.27 / Liquidity Pool gần nhất)
  * @property {number} rr Tỷ lệ Risk : Reward
  * @property {number} lot Khối lượng dự kiến (tính toán sau bởi Risk Manager)
  * @property {string} timeframe Khung thời gian tín hiệu (M15, H1)
+ * @property {'HOLD' | 'SCALP'} tradeStyle Phong cách giao dịch
  * @property {string} reason Lý do vào lệnh ngắn gọn
  * @property {number} confidence Độ tin cậy (0 - 100%)
+ * @property {'UNICORN' | 'OTE' | 'OB_PULLBACK' | 'IFVG' | 'LIQUIDITY_SWEEP' | 'LIQUIDITY_VOID' | 'MITIGATION_BLOCK' | 'NWOG' | 'NDOG' | 'NONE'} [setupModel] Mô hình ICT
+ * @property {'DISCOUNT' | 'PREMIUM' | 'EQUILIBRIUM'} [pdaZone] Vùng PD Array ICT
+ * @property {number|null} [h1Rsi] Giá trị RSI H1 ước tính (Elder Triple Screen lớp 2)
+ * @property {'PASS' | 'OVERBOUGHT_WARNING' | 'OVERSOLD_WARNING' | 'UNKNOWN'} [h1OscillatorFilter] Kết quả bộ lọc Oscillator H1
+ * @property {'TRENDING_LOW_NOISE' | 'CHOP_HIGH_NOISE' | 'SWEEP_REVERSAL' | 'NORMAL'} [marketRegime] Trạng thái nhiễu Kaufman
+ * @property {string} [sessionKillzone] Phiên ICT Killzone
+ * @property {number|null} [efficiencyRatioEst] Chỉ số Kaufman Efficiency Ratio ước tính (0.0 - 1.0)
+ * @property {'UP' | 'DOWN' | 'SIDEWAY'} trend Xu hướng
+ * @property {'UP' | 'DOWN' | 'SIDEWAY'} h4Trend Xu hướng khung lớn H4
+ * @property {boolean} reversalDetected Dấu hiệu đảo chiều xu hướng
+ * @property {string} reversalReason Lý do đảo chiều
  * @property {string} timestamp Thời gian sinh tín hiệu (ISO)
- * @property {'GENERATED' | 'APPROVED' | 'QUEUED' | 'EXECUTING' | 'FILLED' | 'REJECTED'} status Trạng thái
+ * @property {'GENERATED' | 'APPROVED' | 'QUEUED' | 'EXECUTING' | 'FILLED' | 'REJECTED' | 'HOLD'} status Trạng thái
  */
 
 /**
@@ -67,6 +80,7 @@ export function parseTradeSignal(analysisText, currentPrice = null) {
   const entry = Number(parsed.entry || currentPrice || 0);
   const sl = Number(parsed.sl || 0);
   const tp = Number(parsed.tp || 0);
+  const tp1 = parsed.tp1 ? Number(parsed.tp1) : undefined;
 
   // Tính tỷ lệ Risk : Reward (nếu có lệnh giao dịch)
   let rr = 0;
@@ -106,7 +120,12 @@ export function parseTradeSignal(analysisText, currentPrice = null) {
   const signalId = `sig_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   const tf = (parsed.timeframe || 'M5').toUpperCase();
   const rawStyle = parsed.trade_style ? String(parsed.trade_style).toUpperCase() : null;
-  const tradeStyle = (rawStyle === 'HOLD' || rawStyle === 'SWING' || ['H1', 'H4', 'D1'].includes(tf)) ? 'HOLD' : 'SCALP';
+  let tradeStyle = 'SCALP';
+  if (rawStyle === 'SCALP_M1' || tf === 'M1') {
+    tradeStyle = 'SCALP_M1';
+  } else if (rawStyle === 'HOLD' || rawStyle === 'SWING' || ['H1', 'H4', 'D1'].includes(tf)) {
+    tradeStyle = 'HOLD';
+  }
 
   return {
     id: signalId,
@@ -116,14 +135,22 @@ export function parseTradeSignal(analysisText, currentPrice = null) {
     entry,
     sl,
     tp,
+    ...(tp1 ? { tp1 } : {}),
     rr,
     lot: 0.01, // Mặc định, sẽ được Risk Manager gán lại
     timeframe: tf,
     tradeStyle,
     reason: parsed.reason || (isTradeAction ? `Tín hiệu ${tradeStyle}` : 'Thị trường quan sát'),
     confidence: Number(parsed.confidence) || 75,
+    setupModel: parsed.setup_model ? String(parsed.setup_model).toUpperCase() : 'NONE',
+    pdaZone: parsed.pda_zone ? String(parsed.pda_zone).toUpperCase() : 'EQUILIBRIUM',
+    h1Rsi: (parsed.h1_rsi !== undefined && parsed.h1_rsi !== null) ? Number(parsed.h1_rsi) : null,
+    h1OscillatorFilter: parsed.h1_oscillator_filter ? String(parsed.h1_oscillator_filter).toUpperCase() : 'PASS',
+    marketRegime: parsed.market_regime ? String(parsed.market_regime).toUpperCase() : 'NORMAL',
+    sessionKillzone: parsed.session_killzone ? String(parsed.session_killzone).toUpperCase() : 'UNKNOWN',
+    efficiencyRatioEst: (parsed.efficiency_ratio_est !== undefined && parsed.efficiency_ratio_est !== null) ? Number(parsed.efficiency_ratio_est) : null,
     trend: trend || 'SIDEWAY',
-    h4Trend: trend || 'SIDEWAY',
+    h4Trend: (parsed.h4_trend ? String(parsed.h4_trend).toUpperCase() : trend) || 'SIDEWAY',
     reversalDetected,
     reversalReason,
     timestamp: new Date().toISOString(),
